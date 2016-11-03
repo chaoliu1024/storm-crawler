@@ -31,8 +31,6 @@ import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.search.SearchType;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.index.query.functionscore.FunctionScoreQueryBuilder;
-import org.elasticsearch.index.query.functionscore.ScoreFunctionBuilders;
 import org.elasticsearch.search.SearchHits;
 import org.elasticsearch.search.sort.FieldSortBuilder;
 import org.elasticsearch.search.sort.SortBuilders;
@@ -51,236 +49,222 @@ import com.digitalpebble.stormcrawler.util.URLPartitioner;
  **/
 public class ElasticSearchSpout extends AbstractSpout {
 
-    private static final Logger LOG = LoggerFactory
-            .getLogger(ElasticSearchSpout.class);
+	private static final Logger LOG = LoggerFactory.getLogger(ElasticSearchSpout.class);
 
-    private static final String ESStatusBufferSizeParamName = "es.status.max.buffer.size";
-    private static final String ESStatusMaxInflightParamName = "es.status.max.inflight.urls.per.bucket";
-    private static final String ESRandomSortParamName = "es.status.random.sort";
-    private static final String ESMaxSecsSinceQueriedDateParamName = "es.status.max.secs.date";
-    private static final String ESStatusSortFieldParamName = "es.status.sort.field";
+	private static final String ESStatusBufferSizeParamName = "es.status.max.buffer.size";
+	private static final String ESStatusMaxInflightParamName = "es.status.max.inflight.urls.per.bucket";
+	private static final String ESRandomSortParamName = "es.status.random.sort";
+	private static final String ESMaxSecsSinceQueriedDateParamName = "es.status.max.secs.date";
+	private static final String ESStatusSortFieldParamName = "es.status.sort.field";
 
-    private int maxBufferSize = 100;
+	private int maxBufferSize = 100;
 
-    private int lastStartOffset = 0;
-    private Date lastDate;
-    private int maxSecSinceQueriedDate = -1;
+	private int lastStartOffset = 0;
+	private Date lastDate;
+	private int maxSecSinceQueriedDate = -1;
 
-    private URLPartitioner partitioner;
+	private URLPartitioner partitioner;
 
-    private int maxInFlightURLsPerBucket = -1;
+	private int maxInFlightURLsPerBucket = -1;
 
-    // sort results randomly to get better diversity of results
-    // otherwise sort by the value of es.status.sort.field
-    // (default "nextFetchDate")
-    boolean randomSort = true;
+	// sort results randomly to get better diversity of results
+	// otherwise sort by the value of es.status.sort.field
+	// (default "nextFetchDate")
+	boolean randomSort = true;
 
-    /** Keeps a count of the URLs being processed per host/domain/IP **/
-    private Map<String, AtomicInteger> inFlightTracker = new HashMap<>();
+	/** Keeps a count of the URLs being processed per host/domain/IP **/
+	private Map<String, AtomicInteger> inFlightTracker = new HashMap<>();
 
-    // when using multiple instances - each one is in charge of a specific shard
-    // useful when sharding based on host or domain to guarantee a good mix of
-    // URLs
-    private int shardID = -1;
+	// when using multiple instances - each one is in charge of a specific shard
+	// useful when sharding based on host or domain to guarantee a good mix of
+	// URLs
+	private int shardID = -1;
 
-    private String sortField;
+	private String sortField;
 
-    @Override
-    public void open(Map stormConf, TopologyContext context,
-            SpoutOutputCollector collector) {
+	@Override
+	public void open(Map stormConf, TopologyContext context, SpoutOutputCollector collector) {
 
-        maxInFlightURLsPerBucket = ConfUtils.getInt(stormConf,
-                ESStatusMaxInflightParamName, 1);
-        maxBufferSize = ConfUtils.getInt(stormConf,
-                ESStatusBufferSizeParamName, 100);
-        randomSort = ConfUtils.getBoolean(stormConf, ESRandomSortParamName,
-                true);
-        maxSecSinceQueriedDate = ConfUtils.getInt(stormConf,
-                ESMaxSecsSinceQueriedDateParamName, -1);
+		maxInFlightURLsPerBucket = ConfUtils.getInt(stormConf, ESStatusMaxInflightParamName, 1);
+		maxBufferSize = ConfUtils.getInt(stormConf, ESStatusBufferSizeParamName, 100);
+		randomSort = ConfUtils.getBoolean(stormConf, ESRandomSortParamName, true);
+		maxSecSinceQueriedDate = ConfUtils.getInt(stormConf, ESMaxSecsSinceQueriedDateParamName, -1);
 
-        sortField = ConfUtils.getString(stormConf, ESStatusSortFieldParamName,
-                "nextFetchDate");
+		sortField = ConfUtils.getString(stormConf, ESStatusSortFieldParamName, "nextFetchDate");
 
-        super.open(stormConf, context, collector);
+		super.open(stormConf, context, collector);
 
-        partitioner = new URLPartitioner();
-        partitioner.configure(stormConf);
-    }
+		partitioner = new URLPartitioner();
+		partitioner.configure(stormConf);
+	}
 
-    @Override
-    public void nextTuple() {
+	@Override
+	public void nextTuple() {
 
-        // inactive?
-        if (active == false)
-            return;
+		// inactive?
+		if (active == false)
+			return;
 
-        // check that we allowed some time between queries
-        if (throttleESQueries()) {
-            // sleep for a bit but not too much in order to give ack/fail a
-            // chance
-            Utils.sleep(10);
-            return;
-        }
+		// check that we allowed some time between queries
+		if (throttleESQueries()) {
+			// sleep for a bit but not too much in order to give ack/fail a
+			// chance
+			Utils.sleep(10);
+			return;
+		}
 
-        // have anything in the buffer?
-        if (!buffer.isEmpty()) {
-            Values fields = buffer.remove();
+		// have anything in the buffer?
+		if (!buffer.isEmpty()) {
+			Values fields = buffer.remove();
 
-            String url = fields.get(0).toString();
-            Metadata metadata = (Metadata) fields.get(1);
+			String url = fields.get(0).toString();
+			Metadata metadata = (Metadata) fields.get(1);
 
-            String partitionKey = partitioner.getPartition(url, metadata);
+			String partitionKey = partitioner.getPartition(url, metadata);
 
-            // check whether we already have too many tuples in flight for this
-            // partition key
+			// check whether we already have too many tuples in flight for this
+			// partition key
 
-            if (maxInFlightURLsPerBucket != -1) {
-                AtomicInteger inflightforthiskey = inFlightTracker
-                        .get(partitionKey);
-                if (inflightforthiskey == null) {
-                    inflightforthiskey = new AtomicInteger();
-                    inFlightTracker.put(partitionKey, inflightforthiskey);
-                } else if (inflightforthiskey.intValue() >= maxInFlightURLsPerBucket) {
-                    // do it later! left it out of the queue for now
-                    LOG.debug(
-                            "Reached max in flight allowed ({}) for bucket {}",
-                            maxInFlightURLsPerBucket, partitionKey);
-                    eventCounter.scope("skipped.max.per.bucket").incrBy(1);
-                    return;
-                }
-                inflightforthiskey.incrementAndGet();
-            }
+			if (maxInFlightURLsPerBucket != -1) {
+				AtomicInteger inflightforthiskey = inFlightTracker.get(partitionKey);
+				if (inflightforthiskey == null) {
+					inflightforthiskey = new AtomicInteger();
+					inFlightTracker.put(partitionKey, inflightforthiskey);
+				} else if (inflightforthiskey.intValue() >= maxInFlightURLsPerBucket) {
+					// do it later! left it out of the queue for now
+					LOG.debug("Reached max in flight allowed ({}) for bucket {}", maxInFlightURLsPerBucket,
+							partitionKey);
+					eventCounter.scope("skipped.max.per.bucket").incrBy(1);
+					return;
+				}
+				inflightforthiskey.incrementAndGet();
+			}
 
-            beingProcessed.put(url, partitionKey);
+			beingProcessed.put(url, partitionKey);
 
-            this._collector.emit(fields, url);
-            eventCounter.scope("emitted").incrBy(1);
+			this._collector.emit(fields, url);
+			eventCounter.scope("emitted").incrBy(1);
 
-            return;
-        }
-        // re-populate the buffer
-        populateBuffer();
-    }
+			return;
+		}
+		// re-populate the buffer
+		populateBuffer();
+	}
 
-    /** run a query on ES to populate the internal buffer **/
-    private void populateBuffer() {
+	/** run a query on ES to populate the internal buffer **/
+	private void populateBuffer() {
 
-        Date now = new Date();
-        if (lastDate == null) {
-            lastDate = now;
-            lastStartOffset = 0;
-        }
-        // been running same query for too long and paging deep?
-        else if (maxSecSinceQueriedDate != -1) {
-            Date expired = new Date(lastDate.getTime()
-                    + (maxSecSinceQueriedDate * 1000));
-            if (expired.before(now)) {
-                LOG.info("Last date expired {} now {} - resetting query",
-                        expired, now);
-                lastDate = now;
-                lastStartOffset = 0;
-            }
-        }
+		Date now = new Date();
+		if (lastDate == null) {
+			lastDate = now;
+			lastStartOffset = 0;
+		}
+		// been running same query for too long and paging deep?
+		else if (maxSecSinceQueriedDate != -1) {
+			Date expired = new Date(lastDate.getTime() + (maxSecSinceQueriedDate * 1000));
+			if (expired.before(now)) {
+				LOG.info("Last date expired {} now {} - resetting query", expired, now);
+				lastDate = now;
+				lastStartOffset = 0;
+			}
+		}
 
-        LOG.info("Populating buffer with nextFetchDate <= {}", lastDate);
+		LOG.info("Populating buffer with nextFetchDate <= {}", lastDate);
 
-        QueryBuilder rangeQueryBuilder = QueryBuilders.rangeQuery(
-                "nextFetchDate").lte(lastDate);
-        QueryBuilder queryBuilder = rangeQueryBuilder;
+		QueryBuilder rangeQueryBuilder = QueryBuilders.rangeQuery("nextFetchDate").lte(lastDate);
+		QueryBuilder queryBuilder = rangeQueryBuilder;
 
-        if (randomSort) {
-            FunctionScoreQueryBuilder fsqb = new FunctionScoreQueryBuilder(
-                    rangeQueryBuilder);
-            fsqb.add(ScoreFunctionBuilders.randomFunction(lastDate.getTime()));
-            queryBuilder = fsqb;
-        }
+		// TODO fix later
 
-        SearchRequestBuilder srb = client
-                .prepareSearch(indexName)
-                .setTypes(docType)
-                // expensive as it builds global Term/Document Frequencies
-                // TODO look for a more appropriate method
-                .setSearchType(SearchType.DFS_QUERY_THEN_FETCH)
-                .setQuery(queryBuilder).setFrom(lastStartOffset)
-                .setSize(maxBufferSize).setExplain(false);
+		// if (randomSort) {
+		// FunctionScoreQueryBuilder fsqb = new FunctionScoreQueryBuilder(
+		// rangeQueryBuilder);
+		// fsqb.add(ScoreFunctionBuilders.randomFunction(lastDate.getTime()));
+		// queryBuilder = fsqb;
+		// }
 
-        // https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-preference.html
-        // _shards:2,3
-        if (shardID != -1) {
-            srb.setPreference("_shards:" + shardID);
-        }
+		SearchRequestBuilder srb = client.prepareSearch(indexName).setTypes(docType)
+				// expensive as it builds global Term/Document Frequencies
+				// TODO look for a more appropriate method
+				.setSearchType(SearchType.DFS_QUERY_THEN_FETCH).setQuery(queryBuilder).setFrom(lastStartOffset)
+				.setSize(maxBufferSize).setExplain(false);
 
-        if (!randomSort) {
-            FieldSortBuilder sorter = SortBuilders.fieldSort(sortField).order(
-                    SortOrder.ASC);
-            srb.addSort(sorter);
-        }
+		// https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-preference.html
+		// _shards:2,3
+		if (shardID != -1) {
+			srb.setPreference("_shards:" + shardID);
+		}
 
-        long start = System.currentTimeMillis();
-        SearchResponse response = srb.execute().actionGet();
-        long end = System.currentTimeMillis();
+		if (!randomSort) {
+			FieldSortBuilder sorter = SortBuilders.fieldSort(sortField).order(SortOrder.ASC);
+			srb.addSort(sorter);
+		}
 
-        eventCounter.scope("ES_query_time_msec").incrBy(end - start);
+		long start = System.currentTimeMillis();
+		SearchResponse response = srb.execute().actionGet();
+		long end = System.currentTimeMillis();
 
-        SearchHits hits = response.getHits();
-        int numhits = hits.getHits().length;
+		eventCounter.scope("ES_query_time_msec").incrBy(end - start);
 
-        LOG.info("ES query returned {} hits in {} msec", numhits, end - start);
+		SearchHits hits = response.getHits();
+		int numhits = hits.getHits().length;
 
-        eventCounter.scope("ES_queries").incrBy(1);
-        eventCounter.scope("ES_docs").incrBy(numhits);
+		LOG.info("ES query returned {} hits in {} msec", numhits, end - start);
 
-        // no more results?
-        if (numhits == 0) {
-            lastDate = null;
-            lastStartOffset = 0;
-        } else {
-            lastStartOffset += numhits;
-        }
+		eventCounter.scope("ES_queries").incrBy(1);
+		eventCounter.scope("ES_docs").incrBy(numhits);
 
-        // filter results so that we don't include URLs we are already
-        // being processed or skip those for which we already have enough
-        //
-        for (int i = 0; i < hits.getHits().length; i++) {
-            Map<String, Object> keyValues = hits.getHits()[i].sourceAsMap();
-            String url = (String) keyValues.get("url");
+		// no more results?
+		if (numhits == 0) {
+			lastDate = null;
+			lastStartOffset = 0;
+		} else {
+			lastStartOffset += numhits;
+		}
 
-            // is already being processed - skip it!
-            if (beingProcessed.containsKey(url)) {
-                eventCounter.scope("already_being_processed").incrBy(1);
-                continue;
-            }
+		// filter results so that we don't include URLs we are already
+		// being processed or skip those for which we already have enough
+		//
+		for (int i = 0; i < hits.getHits().length; i++) {
+			Map<String, Object> keyValues = hits.getHits()[i].sourceAsMap();
+			String url = (String) keyValues.get("url");
 
-            Metadata metadata = fromKeyValues(keyValues);
-            buffer.add(new Values(url, metadata));
-        }
-    }
+			// is already being processed - skip it!
+			if (beingProcessed.containsKey(url)) {
+				eventCounter.scope("already_being_processed").incrBy(1);
+				continue;
+			}
 
-    @Override
-    public void ack(Object msgId) {
-        LOG.debug("{}  Ack for {}", logIdprefix, msgId);
-        String partitionKey = beingProcessed.remove(msgId);
-        decrementPartitionKey(partitionKey);
-        eventCounter.scope("acked").incrBy(1);
-    }
+			Metadata metadata = fromKeyValues(keyValues);
+			buffer.add(new Values(url, metadata));
+		}
+	}
 
-    @Override
-    public void fail(Object msgId) {
-        LOG.info("{}  Fail for {}", logIdprefix, msgId);
-        String partitionKey = beingProcessed.remove(msgId);
-        decrementPartitionKey(partitionKey);
-        eventCounter.scope("failed").incrBy(1);
-    }
+	@Override
+	public void ack(Object msgId) {
+		LOG.debug("{}  Ack for {}", logIdprefix, msgId);
+		String partitionKey = beingProcessed.remove(msgId);
+		decrementPartitionKey(partitionKey);
+		eventCounter.scope("acked").incrBy(1);
+	}
 
-    private final void decrementPartitionKey(String partitionKey) {
-        if (partitionKey == null)
-            return;
-        AtomicInteger currentValue = this.inFlightTracker.get(partitionKey);
-        if (currentValue == null)
-            return;
-        int newVal = currentValue.decrementAndGet();
-        if (newVal == 0)
-            this.inFlightTracker.remove(partitionKey);
-    }
+	@Override
+	public void fail(Object msgId) {
+		LOG.info("{}  Fail for {}", logIdprefix, msgId);
+		String partitionKey = beingProcessed.remove(msgId);
+		decrementPartitionKey(partitionKey);
+		eventCounter.scope("failed").incrBy(1);
+	}
+
+	private final void decrementPartitionKey(String partitionKey) {
+		if (partitionKey == null)
+			return;
+		AtomicInteger currentValue = this.inFlightTracker.get(partitionKey);
+		if (currentValue == null)
+			return;
+		int newVal = currentValue.decrementAndGet();
+		if (newVal == 0)
+			this.inFlightTracker.remove(partitionKey);
+	}
 
 }

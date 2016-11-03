@@ -36,10 +36,10 @@ import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.aggregations.AggregationBuilders;
 import org.elasticsearch.search.aggregations.Aggregations;
 import org.elasticsearch.search.aggregations.bucket.terms.Terms;
-import org.elasticsearch.search.aggregations.bucket.terms.TermsBuilder;
-import org.elasticsearch.search.aggregations.metrics.min.MinBuilder;
+import org.elasticsearch.search.aggregations.bucket.terms.TermsAggregationBuilder;
+import org.elasticsearch.search.aggregations.metrics.min.MinAggregationBuilder;
 import org.elasticsearch.search.aggregations.metrics.tophits.TopHits;
-import org.elasticsearch.search.aggregations.metrics.tophits.TopHitsBuilder;
+import org.elasticsearch.search.aggregations.metrics.tophits.TopHitsAggregationBuilder;
 import org.elasticsearch.search.sort.FieldSortBuilder;
 import org.elasticsearch.search.sort.SortBuilders;
 import org.elasticsearch.search.sort.SortOrder;
@@ -156,23 +156,23 @@ public class AggregationSpout extends AbstractSpout {
                 .setQuery(rangeQueryBuilder).setFrom(0).setSize(0)
                 .setExplain(false);
 
-        TermsBuilder aggregations = AggregationBuilders.terms("partition")
+        TermsAggregationBuilder aggregations = AggregationBuilders.terms("partition")
                 .field("metadata." + partitionField).size(maxBucketNum);
 
-        TopHitsBuilder tophits = AggregationBuilders.topHits("docs")
-                .setSize(maxURLsPerBucket).setExplain(false);
+        TopHitsAggregationBuilder tophits = AggregationBuilders.topHits("docs")
+                .size(maxURLsPerBucket).explain(false);
         // sort within a bucket
         if (StringUtils.isNotBlank(bucketSortField)) {
             FieldSortBuilder sorter = SortBuilders.fieldSort(bucketSortField)
                     .order(SortOrder.ASC);
-            tophits.addSort(sorter);
+            tophits.sort(sorter);
         }
 
         aggregations.subAggregation(tophits);
 
         // sort between buckets
         if (StringUtils.isNotBlank(totalSortField)) {
-            MinBuilder minBuilder = AggregationBuilders.min("top_hit").field(
+            MinAggregationBuilder minBuilder = AggregationBuilders.min("top_hit").field(
                     totalSortField);
             aggregations.subAggregation(minBuilder);
             aggregations.order(Terms.Order.aggregation("top_hit", true));
