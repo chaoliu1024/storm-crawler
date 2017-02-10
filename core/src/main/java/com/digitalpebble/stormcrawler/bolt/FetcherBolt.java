@@ -59,7 +59,7 @@ import com.digitalpebble.stormcrawler.util.ConfUtils;
 import com.digitalpebble.stormcrawler.util.PerSecondReducer;
 
 import crawlercommons.robots.BaseRobotRules;
-import crawlercommons.url.PaidLevelDomain;
+import crawlercommons.domains.PaidLevelDomain;
 
 /**
  * A multithreaded, queue-based fetcher adapted from Apache Nutch. Enforces the
@@ -509,14 +509,14 @@ public class FetcherBolt extends StatusEmitterBolt {
                             taskID, fit.url, response.getStatusCode(),
                             timeFetching);
 
+                    // passes the input metadata if any to the response one
+                    response.getMetadata().putAll(metadata);
+
                     response.getMetadata().setValue("fetch.statusCode",
                             Integer.toString(response.getStatusCode()));
 
                     response.getMetadata().setValue("fetch.loadingTime",
                             Long.toString(timeFetching));
-
-                    // passes the input metadata if any to the response one
-                    response.getMetadata().putAll(metadata);
 
                     // determine the status based on the status code
                     final Status status = Status.fromHTTPCode(response
@@ -720,6 +720,11 @@ public class FetcherBolt extends StatusEmitterBolt {
     public void declareOutputFields(OutputFieldsDeclarer declarer) {
         super.declareOutputFields(declarer);
         declarer.declare(new Fields("url", "content", "metadata"));
+    }
+
+    @Override
+    public void cleanup() {
+        protocolFactory.cleanup();
     }
 
     @Override

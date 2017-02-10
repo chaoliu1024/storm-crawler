@@ -15,35 +15,39 @@
  * limitations under the License.
  */
 
-package com.digitalpebble.stormcrawler.filtering.basic;
-
-import java.net.URL;
-import java.util.Map;
+package com.digitalpebble.stormcrawler.aws.s3;
 
 import com.digitalpebble.stormcrawler.Metadata;
-import com.digitalpebble.stormcrawler.filtering.URLFilter;
-import com.fasterxml.jackson.databind.JsonNode;
 
-/** Filters links to self **/
-public class SelfURLFilter implements URLFilter {
+/**
+ * Caches byte[] content into S3
+ **/
+@SuppressWarnings("serial")
+public class S3ContentCacher extends S3Cacher {
 
     @Override
-    public String filter(URL sourceUrl, Metadata sourceMetadata,
-            String urlToFilter) {
-
-        if (sourceUrl == null) {
-            return urlToFilter;
+    protected byte[] getContentToCache(Metadata metadata, byte[] content,
+            String url) {
+        if (!"true".equalsIgnoreCase(metadata.getFirstValue("http.trimmed"))) {
+            return content;
         }
 
-        if (sourceUrl.toExternalForm().equalsIgnoreCase(urlToFilter))
-            return null;
-
-        return urlToFilter;
+        LOG.info("Content was trimmed, so will not return to be cached");
+        return null;
     }
 
     @Override
-    public void configure(Map stormConf, JsonNode paramNode) {
-
+    protected String getKeyPrefix() {
+        return "";
     }
 
+    @Override
+    protected String getMetricPrefix() {
+        return "counters_" + getClass().getSimpleName();
+    }
+
+    @Override
+    protected boolean shouldOverwrite(Metadata metadata) {
+        return (!"true".equalsIgnoreCase(metadata.getFirstValue(INCACHE)));
+    }
 }

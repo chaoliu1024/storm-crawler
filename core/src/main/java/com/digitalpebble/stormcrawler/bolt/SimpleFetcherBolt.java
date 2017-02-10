@@ -54,7 +54,7 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 
 import crawlercommons.robots.BaseRobotRules;
-import crawlercommons.url.PaidLevelDomain;
+import crawlercommons.domains.PaidLevelDomain;
 
 /**
  * A single-threaded fetcher with no internal queue. Use of this fetcher
@@ -80,8 +80,6 @@ public class SimpleFetcherBolt extends StatusEmitterBolt {
     private ProtocolFactory protocolFactory;
 
     private int taskID = -1;
-
-    private boolean allowRedirs;
 
     boolean sitemapsAutoDiscovery = false;
 
@@ -187,6 +185,11 @@ public class SimpleFetcherBolt extends StatusEmitterBolt {
     public void declareOutputFields(OutputFieldsDeclarer declarer) {
         super.declareOutputFields(declarer);
         declarer.declare(new Fields("url", "content", "metadata"));
+    }
+
+    @Override
+    public void cleanup() {
+        protocolFactory.cleanup();
     }
 
     @Override
@@ -318,13 +321,13 @@ public class SimpleFetcherBolt extends StatusEmitterBolt {
                     taskID, urlString, response.getStatusCode(), timeFetching,
                     timeWaiting);
 
+            response.getMetadata().putAll(metadata);
+
             response.getMetadata().setValue("fetch.statusCode",
                     Integer.toString(response.getStatusCode()));
 
             response.getMetadata().setValue("fetch.loadingTime",
                     Long.toString(timeFetching));
-
-            response.getMetadata().putAll(metadata);
 
             // determine the status based on the status code
             final Status status = Status.fromHTTPCode(response.getStatusCode());
@@ -360,7 +363,7 @@ public class SimpleFetcherBolt extends StatusEmitterBolt {
                     response.getMetadata().setValue("_redirTo", redirection);
                 }
 
-                if (allowRedirs && StringUtils.isNotBlank(redirection)) {
+                if (allowRedirs() && StringUtils.isNotBlank(redirection)) {
                     emitOutlink(input, url, redirection, response.getMetadata());
                 }
                 // Mark URL as redirected

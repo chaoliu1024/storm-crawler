@@ -11,6 +11,9 @@ config:
   topology.debug: false
 
   fetcher.threads.number: 50
+  
+  # give 2gb to the workers
+  worker.heap.memory.mb: 2048
 
   # mandatory when using Flux
   topology.kryo.register:
@@ -58,6 +61,7 @@ config:
 
   # custom fetch interval to be used when a document has the key/value in its metadata
   # and has been fetched succesfully (value in minutes)
+  # fetchInterval.FETCH_ERROR.isFeed=true
   # fetchInterval.isFeed=true: 10
 
   # configuration for the classes extending AbstractIndexerBolt
